@@ -1,0 +1,9 @@
+flask==3.0.2
+flask-cors==4.0.0
+flask-sse==0.2.1
+redis==5.0.1
+opencv-python-headless==4.9.0.80  # Updated version with Python 3.12 support
+mediapipe==0.10.21  # Latest version with Python 3.12 support
+numpy==1.26.4
+requests==2.31.0
+python-dotenv==1.0.1

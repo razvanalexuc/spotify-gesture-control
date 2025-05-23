@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spotify Gesture Control</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #121212;
+            color: #ffffff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1000px;
+            width: 100%;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #1DB954;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .video-container {
+            position: relative;
+            width: 640px;
+            margin: 0 auto;
+            border: 3px solid #1DB954;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        #videoFeed {
+            width: 100%;
+            display: block;
+        }
+        .controls {
+            margin-top: 20px;
+            padding: 20px;
+            background-color: #1e1e1e;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 4px;
+            font-weight: bold;
+            text-align: center;
+        }
+        .connected {
+            background-color: #1DB954;
+            color: white;
+        }
+        .disconnected {
+            background-color: #e74c3c;
+            color: white;
+        }
+        .gesture-info {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #282828;
+            border-radius: 8px;
+        }
+        .gesture-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .gesture-item {
+            padding: 10px;
+            background-color: #333;
+            border-radius: 4px;
+            text-align: left;
+        }
+        .gesture-item span {
+            color: #1DB954;
+            font-weight: bold;
+        }
+        #gestureStatus {
+            font-size: 1.2em;
+            margin: 10px 0;
+            min-height: 24px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎵 Spotify Gesture Control</h1>
+        
+        <div class="video-container">
+            <img id="videoFeed" src="{{ url_for('video_feed') }}" alt="Video Feed">
+        </div>
+
+        <div class="controls">
+            <div id="authSection">
+                <a id="loginButton" href="{{ auth_url }}" class="button">
+                    <button style="padding: 10px 20px; background-color: #1DB954; color: white; border: none; border-radius: 20px; cursor: pointer; font-size: 16px; font-weight: bold;">
+                        Connect to Spotify
+                    </button>
+                </a>
+                <div id="status" class="status disconnected">Not connected to Spotify</div>
+            </div>
+            
+            <div id="gestureStatus"></div>
+            
+            <div class="gesture-info">
+                <h3>Available Gestures:</h3>
+                <div class="gesture-list">
+                    <div class="gesture-item">
+                        <span>Right Hand to Right Shoulder</span> - Next Track
+                    </div>
+                    <div class="gesture-item">
+                        <span>Left Hand to Left Shoulder</span> - Previous Track
+                    </div>
+                    <div class="gesture-item">
+                        <span>Thumbs Up</span> - Volume Up
+                    </div>
+                    <div class="gesture-item">
+                        <span>Thumbs Down</span> - Volume Down
+                    </div>
+                    <div class="gesture-item">
+                        <span>Open Palm</span> - Play/Pause
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Check if we have an access token in the URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const accessToken = urlParams.get('access_token');
+        
+        if (accessToken) {
+            // Update UI to show connected state
+            document.getElementById('status').textContent = 'Connected to Spotify!';
+            document.getElementById('status').className = 'status connected';
+            
+            // Store the token in session storage
+            sessionStorage.setItem('spotify_access_token', accessToken);
+            
+            // Clean up the URL
+            window.history.replaceState({}, document.title, window.location.pathname);
+        } else if (sessionStorage.getItem('spotify_access_token')) {
+            // If we have a token in session storage
+            document.getElementById('status').textContent = 'Connected to Spotify!';
+            document.getElementById('status').className = 'status connected';
+        }
+        
+        // Listen for gesture updates from the server
+        const eventSource = new EventSource('/gesture_updates');
+        const gestureStatus = document.getElementById('gestureStatus');
+        
+        eventSource.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            if (data.gesture) {
+                gestureStatus.textContent = `Detected Gesture: ${data.gesture}`;
+                gestureStatus.style.color = '#1DB954';
+                
+                // Clear the message after 2 seconds
+                setTimeout(() => {
+                    gestureStatus.textContent = '';
+                }, 2000);
+            }
+        };
+        
+        eventSource.onerror = function() {
+            console.error('EventSource failed.');
+            eventSource.close();
+        };
+    </script>
+</body>
+</html>
