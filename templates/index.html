@@ -1,4 +1,3 @@
-<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -99,12 +98,21 @@
 
         <div class="controls">
             <div id="authSection">
-                <a id="loginButton" href="{{ auth_url }}" class="button">
-                    <button style="padding: 10px 20px; background-color: #1DB954; color: white; border: none; border-radius: 20px; cursor: pointer; font-size: 16px; font-weight: bold;">
-                        Connect to Spotify
-                    </button>
-                </a>
-                <div id="status" class="status disconnected">Not connected to Spotify</div>
+                {% if is_authenticated %}
+                    <div id="status" class="status connected">Connected to Spotify! 🎵</div>
+                    <div style="margin-top: 10px;">
+                        <button id="logoutButton" style="padding: 8px 16px; background-color: #e74c3c; color: white; border: none; border-radius: 20px; cursor: pointer; font-size: 14px;">
+                            Disconnect Spotify
+                        </button>
+                    </div>
+                {% else %}
+                    <a id="loginButton" href="{{ auth_url }}" class="button">
+                        <button style="padding: 10px 20px; background-color: #1DB954; color: white; border: none; border-radius: 20px; cursor: pointer; font-size: 16px; font-weight: bold;">
+                            Connect to Spotify
+                        </button>
+                    </a>
+                    <div id="status" class="status disconnected">Not connected to Spotify</div>
+                {% endif %}
             </div>
             
             <div id="gestureStatus"></div>
@@ -137,22 +145,17 @@
         const urlParams = new URLSearchParams(window.location.search);
         const accessToken = urlParams.get('access_token');
         
-        if (accessToken) {
-            // Update UI to show connected state
-            document.getElementById('status').textContent = 'Connected to Spotify!';
-            document.getElementById('status').className = 'status connected';
-            
-            // Store the token in session storage
-            sessionStorage.setItem('spotify_access_token', accessToken);
-            
-            // Clean up the URL
-            window.history.replaceState({}, document.title, window.location.pathname);
-        } else if (sessionStorage.getItem('spotify_access_token')) {
-            // If we have a token in session storage
-            document.getElementById('status').textContent = 'Connected to Spotify!';
-            document.getElementById('status').className = 'status connected';
+        // Handle logout button click
+        const logoutButton = document.getElementById('logoutButton');
+        if (logoutButton) {
+            logoutButton.addEventListener('click', function() {
+                // Clear session storage
+                sessionStorage.removeItem('spotify_access_token');
+                // Redirect to logout endpoint
+                window.location.href = '/logout';
+            });
         }
-        
+
         // Listen for gesture updates from the server
         const eventSource = new EventSource('/gesture_updates');
         const gestureStatus = document.getElementById('gestureStatus');

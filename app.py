@@ -50,72 +50,79 @@ def detect_gesture(pose_landmarks, hand_landmarks):
     
     current_time = time.time()
     if current_time - last_gesture_time < GESTURE_COOLDOWN:
-        return None
+        return current_gesture  # Return current gesture if still in cooldown
     
     # Initialize gesture as None
     detected_gesture = None
     
-    if pose_landmarks:
-        landmarks = pose_landmarks.landmark
-        
-        # Calculate distances
-        def distance(a, b):
-            return ((a.x - b.x)**2 + (a.y - b.y)**2)**0.5
-        
-        # NEXT: Right hand to right shoulder
-        right_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER]
-        right_hand = landmarks[mp_pose.PoseLandmark.RIGHT_WRIST]
-        
-        # PREVIOUS: Left hand to left shoulder
-        left_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER]
-        left_hand = landmarks[mp_pose.PoseLandmark.LEFT_WRIST]
-        
-        # Check for shoulder touches
-        if distance(right_hand, right_shoulder) < 0.1:
-            detected_gesture = "NEXT"
-        elif distance(left_hand, left_shoulder) < 0.1:
-            detected_gesture = "PREVIOUS"
-    
-    # Hand gesture detection
-    if hand_landmarks and not detected_gesture:
-        # Get hand landmarks
-        hand = hand_landmarks.landmark
-        
-        # Check for thumbs up (Volume Up)
-        thumb_tip = hand[4]  # Thumb tip
-        index_tip = hand[8]  # Index finger tip
-        
-        # Thumb is above the index finger (y-coordinate is lower in image space)
-        if thumb_tip.y < index_tip.y and thumb_tip.x > hand[0].x:
-            detected_gesture = "VOLUME_UP"
-        
-        # Check for thumbs down (Volume Down)
-        elif thumb_tip.y > index_tip.y and thumb_tip.x > hand[0].x:
-            detected_gesture = "VOLUME_DOWN"
+    try:
+        if pose_landmarks:
+            landmarks = pose_landmarks.landmark
             
-        # Check for open palm (Play/Pause)
-        fingers_up = 0
-        for fingertip in [8, 12, 16, 20]:  # Tips of index, middle, ring, pinky
-            if hand[fingertip].y < hand[fingertip-2].y:  # If tip is above joint
-                fingers_up += 1
+            # Calculate distances
+            def distance(a, b):
+                return ((a.x - b.x)**2 + (a.y - b.y)**2)**0.5
+            
+            # NEXT: Right hand to right shoulder
+            right_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER]
+            right_hand = landmarks[mp_pose.PoseLandmark.RIGHT_WRIST]
+            
+            # PREVIOUS: Left hand to left shoulder
+            left_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER]
+            left_hand = landmarks[mp_pose.PoseLandmark.LEFT_WRIST]
+            
+            # Check for shoulder touches
+            if distance(right_hand, right_shoulder) < 0.1:
+                detected_gesture = "NEXT"
+            elif distance(left_hand, left_shoulder) < 0.1:
+                detected_gesture = "PREVIOUS"
         
-        if fingers_up >= 3:  # Most fingers extended
-            detected_gesture = "TOGGLE_PLAY"
-    
-    # Update global state if a new gesture is detected
-    with gesture_lock:
+        # Hand gesture detection
+        if hand_landmarks and not detected_gesture:
+            # Get hand landmarks
+            hand = hand_landmarks.landmark
+            
+            # Check for thumbs up (Volume Up)
+            thumb_tip = hand[4]  # Thumb tip
+            index_tip = hand[8]  # Index finger tip
+            
+            # Thumb is above the index finger (y-coordinate is lower in image space)
+            if thumb_tip.y < index_tip.y and thumb_tip.x > hand[0].x:
+                detected_gesture = "VOLUME_UP"
+            
+            # Check for thumbs down (Volume Down)
+            elif thumb_tip.y > index_tip.y and thumb_tip.x > hand[0].x:
+                detected_gesture = "VOLUME_DOWN"
+                
+            # Check for open palm (Play/Pause)
+            fingers_up = 0
+            for fingertip in [8, 12, 16, 20]:  # Tips of index, middle, ring, pinky
+                if hand[fingertip].y < hand[fingertip-2].y:  # If tip is above joint
+                    fingers_up += 1
+            
+            if fingers_up >= 3:  # Most fingers extended
+                detected_gesture = "TOGGLE_PLAY"
+        
+        # Update global state if a new gesture is detected
         if detected_gesture and detected_gesture != current_gesture:
-            current_gesture = detected_gesture
-            last_gesture_time = current_time
+            with gesture_lock:
+                current_gesture = detected_gesture
+                last_gesture_time = current_time
+                
+                # Control Spotify in a separate thread to avoid blocking
+                if auth_token:
+                    import threading
+                    threading.Thread(
+                        target=control_spotify,
+                        args=(detected_gesture, auth_token)
+                    ).start()
             
-            # Send SSE update
-            sse.publish({"gesture": detected_gesture}, type='gesture')
+            return detected_gesture
             
-            # Control Spotify
-            if auth_token:
-                control_spotify(detected_gesture, auth_token)
+    except Exception as e:
+        print(f"Error in gesture detection: {e}")
     
-    return detected_gesture
+    return current_gesture  # Return current gesture if no new gesture detected
 
 # Spotify API functions
 def get_auth_token():
@@ -168,67 +175,77 @@ def control_spotify(action, token):
 
 def generate_frames():
     cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Error: Could not open video device")
+        return
     
+    # Set a lower resolution for better performance
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    
+    # Initialize MediaPipe components with optimized settings
     with mp_pose.Pose(
         min_detection_confidence=0.5,
-        min_tracking_confidence=0.5) as pose, \
+        min_tracking_confidence=0.5,
+        model_complexity=1) as pose, \
         mp_hands.Hands(
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
             max_num_hands=2) as hands:
         
+        frame_count = 0
+        process_every_n_frame = 2  # Process every 2nd frame for better performance
+        
         while cap.isOpened():
             success, frame = cap.read()
             if not success:
-                break
+                print("Ignoring empty camera frame.")
+                continue
                 
+            frame_count += 1
+            process_gesture = (frame_count % process_every_n_frame) == 0
+            
             # Convert the BGR image to RGB
             image = cv2.cvtColor(cv2.flip(frame, 1), cv2.COLOR_BGR2RGB)
             image.flags.writeable = False
             
-            # Process the image and detect pose and hands
-            pose_results = pose.process(image)
-            hand_results = hands.process(image)
+            # Only process pose and hands if we're processing this frame for gestures
+            if process_gesture:
+                # Process the image and detect pose and hands
+                pose_results = pose.process(image)
+                hand_results = hands.process(image)
+                
+                # Update gesture detection in a non-blocking way
+                if pose_results.pose_landmarks:
+                    hand_landmarks = hand_results.multi_hand_landmarks[0] if hand_results.multi_hand_landmarks else None
+                    # Start a new thread for gesture detection to avoid blocking
+                    import threading
+                    threading.Thread(
+                        target=detect_gesture,
+                        args=(pose_results.pose_landmarks, hand_landmarks)
+                    ).start()
             
-            # Draw the pose and hand annotations on the image
+            # Prepare image for display (always do this for smooth video)
             image.flags.writeable = True
             image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
             
-            # Draw pose landmarks
-            if pose_results.pose_landmarks:
-                mp_drawing.draw_landmarks(
-                    image,
-                    pose_results.pose_landmarks,
-                    mp_pose.POSE_CONNECTIONS,
-                    landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style())
-            
-            # Draw hand landmarks
-            if hand_results.multi_hand_landmarks:
-                for hand_landmarks in hand_results.multi_hand_landmarks:
-                    mp_drawing.draw_landmarks(
-                        image,
-                        hand_landmarks,
-                        mp_hands.HAND_CONNECTIONS,
-                        mp_drawing_styles.get_default_hand_landmarks_style(),
-                        mp_drawing_styles.get_default_hand_connections_style())
-            
-            # Detect gesture
-            if pose_results.pose_landmarks:
-                hand_landmarks = hand_results.multi_hand_landmarks[0] if hand_results.multi_hand_landmarks else None
-                detect_gesture(pose_results.pose_landmarks, hand_landmarks)
-            
-            # Display current gesture
+            # Draw current gesture status (this is quick and doesn't block)
             with gesture_lock:
                 gesture_text = f"Gesture: {current_gesture}" if current_gesture else "No gesture detected"
-                cv2.putText(image, gesture_text, (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+            
+            # Add text to the frame
+            cv2.putText(image, gesture_text, (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
             
             # Encode the frame
-            ret, buffer = cv2.imencode('.jpg', image)
-            frame = buffer.tobytes()
-            
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            try:
+                ret, buffer = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                frame = buffer.tobytes()
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            except Exception as e:
+                print(f"Error encoding frame: {e}")
+                continue
     
     cap.release()
 
@@ -237,12 +254,18 @@ def generate_frames():
 def index():
     # Check if user is authenticated
     token = request.args.get('access_token') or session.get('spotify_token')
+    is_authenticated = False
+    
     if token:
         session['spotify_token'] = token
         global auth_token
         auth_token = token
+        is_authenticated = True
     
-    return render_template('index.html', auth_url=AUTH_URL)
+    return render_template('index.html', 
+                          auth_url=AUTH_URL, 
+                          is_authenticated=is_authenticated,
+                          token=token)
 
 @app.route('/video_feed')
 def video_feed():
@@ -252,6 +275,16 @@ def video_feed():
 @app.route('/auth')
 def auth():
     return jsonify({"auth_url": AUTH_URL})
+
+@app.route('/logout')
+def logout():
+    # Clear the session data
+    session.pop('spotify_token', None)
+    session.pop('spotify_refresh', None)
+    global auth_token, refresh_token
+    auth_token = None
+    refresh_token = None
+    return redirect(url_for('index'))
 
 @app.route('/gesture_updates')
 def gesture_updates():
@@ -300,7 +333,10 @@ def callback():
         if response.status_code == 200:
             auth_token = response.json().get("access_token")
             refresh_token = response.json().get("refresh_token")
-            return "Successfully authenticated with Spotify! You can close this window."
+            session['spotify_token'] = auth_token
+            session['spotify_refresh'] = refresh_token
+            # Redirect back to the main page with the token in the URL
+            return redirect(f'/?access_token={auth_token}')
     
     return "Authentication failed. Please try again."
 
@@ -308,6 +344,4 @@ if __name__ == '__main__':
     # Get initial token if using client credentials flow
     if not auth_token and CLIENT_ID and CLIENT_SECRET:
         auth_token = get_auth_token()
-    
-    # Start the Flask app
-    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True, use_reloader=False)
+    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
