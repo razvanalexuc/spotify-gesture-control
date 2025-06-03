@@ -141,6 +141,10 @@ def get_auth_token():
     return response.json().get("access_token")
 
 def control_spotify(action, token):
+    if not token:
+        print("Error: No access token provided")
+        return False
+        
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
@@ -149,28 +153,91 @@ def control_spotify(action, token):
     base_url = "https://api.spotify.com/v1/me/player"
     
     try:
-        if action == "NEXT":
-            response = requests.post(f"{base_url}/next", headers=headers)
-        elif action == "PREVIOUS":
-            response = requests.post(f"{base_url}/previous", headers=headers)
-        elif action == "PLAY":
-            response = requests.put(f"{base_url}/play", headers=headers)
-        elif action == "PAUSE":
-            response = requests.put(f"{base_url}/pause", headers=headers)
-        elif action == "VOLUME_UP":
-            # Get current volume and increase
-            current = requests.get(f"{base_url}/volume", headers=headers).json()
-            new_vol = min(100, int(current.get('volume_percent', 50)) + 10)
-            response = requests.put(f"{base_url}/volume?volume_percent={new_vol}", headers=headers)
-        elif action == "VOLUME_DOWN":
-            # Get current volume and decrease
-            current = requests.get(f"{base_url}/volume", headers=headers).json()
-            new_vol = max(0, int(current.get('volume_percent', 50)) - 10)
-            response = requests.put(f"{base_url}/volume?volume_percent={new_vol}", headers=headers)
+        # Handle volume controls first as they require additional API calls
+        if action in ["VOLUME_UP", "VOLUME_DOWN"]:
+            try:
+                # Get current volume
+                vol_response = requests.get(f"{base_url}/volume", headers=headers, timeout=5)
+                if vol_response.status_code != 200:
+                    print(f"Failed to get current volume: {vol_response.status_code}")
+                    return False
+                    
+                current_vol = vol_response.json().get('volume_percent', 50)
+                
+                # Calculate new volume
+                if action == "VOLUME_UP":
+                    new_vol = min(100, int(current_vol) + 10)
+                else:  # VOLUME_DOWN
+                    new_vol = max(0, int(current_vol) - 10)
+                
+                # Set new volume
+                response = requests.put(
+                    f"{base_url}/volume",
+                    params={"volume_percent": new_vol},
+                    headers=headers,
+                    timeout=5
+                )
+            except requests.exceptions.RequestException as e:
+                print(f"Volume control error: {e}")
+                return False
+                
+        # Handle other actions
+        else:
+            endpoints = {
+                "NEXT": ("POST", f"{base_url}/next"),
+                "PREVIOUS": ("POST", f"{base_url}/previous"),
+                "PLAY": ("PUT", f"{base_url}/play"),
+                "PAUSE": ("PUT", f"{base_url}/pause"),
+                "TOGGLE_PLAY": ("PUT", f"{base_url}/play")  # Toggle play/pause
+            }
             
-        return response.status_code == 204
+            if action not in endpoints:
+                print(f"Unknown action: {action}")
+                return False
+                
+            method, url = endpoints[action]
+            
+            try:
+                if method == "POST":
+                    response = requests.post(url, headers=headers, timeout=5)
+                else:  # PUT
+                    response = requests.put(url, headers=headers, timeout=5)
+                    
+                # For toggle play, if play fails, try pause
+                if action == "TOGGLE_PLAY" and response.status_code != 204:
+                    response = requests.put(f"{base_url}/pause", headers=headers, timeout=5)
+                    
+            except requests.exceptions.RequestException as e:
+                print(f"Request failed for {action}: {e}")
+                return False
+        
+        # Check if the response was successful
+        if response.status_code in (200, 202, 204):
+            return True
+            
+        # Handle specific error cases
+        if response.status_code == 401:  # Unauthorized
+            print("Error: Invalid or expired token")
+        elif response.status_code == 403:  # Forbidden
+            print("Error: Insufficient permissions")
+        elif response.status_code == 404:  # Not found
+            print("Error: No active device found")
+        else:
+            print(f"Unexpected status code: {response.status_code}")
+            
+        # Print response details for debugging
+        try:
+            error_details = response.json()
+            print(f"Error details: {error_details}")
+        except:
+            print(f"Response content: {response.text}")
+            
+        return False
+        
     except Exception as e:
-        print(f"Error controlling Spotify: {e}")
+        print(f"Unexpected error in control_spotify: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def generate_frames():
@@ -229,11 +296,33 @@ def generate_frames():
             image.flags.writeable = True
             image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
             
-            # Draw current gesture status (this is quick and doesn't block)
+            # Draw pose landmarks if detected
+            if process_gesture and hasattr(pose_results, 'pose_landmarks') and pose_results.pose_landmarks:
+                mp_drawing.draw_landmarks(
+                    image,
+                    pose_results.pose_landmarks,
+                    mp_pose.POSE_CONNECTIONS,
+                    landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style()
+                )
+            
+            # Draw hand landmarks if detected
+            if process_gesture and hasattr(hand_results, 'multi_hand_landmarks') and hand_results.multi_hand_landmarks:
+                for hand_landmarks in hand_results.multi_hand_landmarks:
+                    mp_drawing.draw_landmarks(
+                        image,
+                        hand_landmarks,
+                        mp_hands.HAND_CONNECTIONS,
+                        mp_drawing_styles.get_default_hand_landmarks_style(),
+                        mp_drawing_styles.get_default_hand_connections_style()
+                    )
+            
+            # Draw current gesture status
             with gesture_lock:
                 gesture_text = f"Gesture: {current_gesture}" if current_gesture else "No gesture detected"
             
-            # Add text to the frame
+            # Add text to the frame with a background for better visibility
+            text_size = cv2.getTextSize(gesture_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+            cv2.rectangle(image, (5, 5), (15 + text_size[0], 40), (0, 0, 0), -1)  # Background
             cv2.putText(image, gesture_text, (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
             
