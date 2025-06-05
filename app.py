@@ -90,40 +90,46 @@ def detect_gesture(pose_landmarks, hand_landmarks, face_landmarks=None):
             # 2. Check for cheek touches (if no shoulder touch detected and face landmarks are available)
             if not detected_gesture and face_landmarks and hand_landmarks and hasattr(hand_landmarks, 'landmark') and len(hand_landmarks.landmark) > 8:
                 try:
-                    # Get hand wrist position
-                    wrist = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST.value]
+                    # Get hand index finger tip position (easier to see and control)
+                    index_tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP.value]
                     
-                    # Get cheek landmarks (indices for left and right cheek points in face mesh)
-                    # Note: These indices might need adjustment based on the exact face mesh model
-                    LEFT_CHEEK_INDEX = 234  # Approximate index for left cheek
-                    RIGHT_CHEEK_INDEX = 454  # Approximate index for right cheek
+                    # Get key face landmarks (these are more reliable than cheek points)
+                    face_landmarks_list = face_landmarks.landmark if hasattr(face_landmarks, 'landmark') else face_landmarks
                     
-                    # Access face mesh landmarks correctly
-                    if hasattr(face_landmarks, 'landmark'):
-                        left_cheek = face_landmarks.landmark[LEFT_CHEEK_INDEX]
-                        right_cheek = face_landmarks.landmark[RIGHT_CHEEK_INDEX]
-                    else:
-                        # If face_landmarks is already the landmark list
-                        left_cheek = face_landmarks[LEFT_CHEEK_INDEX]
-                        right_cheek = face_landmarks[RIGHT_CHEEK_INDEX]
+                    # MediaPipe Face Mesh landmark indices
+                    NOSE_TIP = 1
+                    MOUTH_LEFT = 61
+                    MOUTH_RIGHT = 291
                     
-                    # Calculate distances from hand to cheeks
-                    left_cheek_dist = distance(wrist, left_cheek)
-                    right_cheek_dist = distance(wrist, right_cheek)
-                    
-                    # Check for cheek touches
-                    CHEEK_THRESHOLD = 0.1  # Adjust this value for sensitivity
-                    
-                    if left_cheek_dist < CHEEK_THRESHOLD:
-                        detected_gesture = "VOLUME_DOWN"
-                        print(f"Left cheek touch detected ({left_cheek_dist:.3f}) -> Volume Down")
-                    elif right_cheek_dist < CHEEK_THRESHOLD:
-                        detected_gesture = "VOLUME_UP"
-                        print(f"Right cheek touch detected ({right_cheek_dist:.3f}) -> Volume Up")
-                except (IndexError, AttributeError) as e:
-                    # Skip if there's an error accessing landmarks
-                    print(f"Error accessing face landmarks: {e}")
-                    pass
+                    if len(face_landmarks_list) > max(NOSE_TIP, MOUTH_LEFT, MOUTH_RIGHT):
+                        nose_tip = face_landmarks_list[NOSE_TIP]
+                        mouth_left = face_landmarks_list[MOUTH_LEFT]
+                        mouth_right = face_landmarks_list[MOUTH_RIGHT]
+                        
+                        # Calculate face width for relative distance
+                        face_width = distance(mouth_left, mouth_right)
+                        
+                        # Calculate distances from finger to nose and mouth corners
+                        dist_to_nose = distance(index_tip, nose_tip)
+                        dist_to_mouth_left = distance(index_tip, mouth_left)
+                        dist_to_mouth_right = distance(index_tip, mouth_right)
+                        
+                        # Debug output
+                        # print(f"Nose: {dist_to_nose:.3f}, Left: {dist_to_mouth_left:.3f}, Right: {dist_to_mouth_right:.3f}")
+                        
+                        # Threshold is relative to face size
+                        TOUCH_THRESHOLD = face_width * 0.5
+                        
+                        # Check for left side touch (right side of the screen)
+                        if dist_to_mouth_left < TOUCH_THRESHOLD and dist_to_mouth_left < dist_to_nose:
+                            detected_gesture = "VOLUME_DOWN"
+                            print(f"Left side touch detected -> Volume Down")
+                        # Check for right side touch (left side of the screen)
+                        elif dist_to_mouth_right < TOUCH_THRESHOLD and dist_to_mouth_right < dist_to_nose:
+                            detected_gesture = "VOLUME_UP"
+                            print(f"Right side touch detected -> Volume Up")
+                except Exception as e:
+                    print(f"Error in cheek detection: {e}")
             
             # 3. Thumb detection (if no cheek or shoulder touch detected)
             if not detected_gesture and len(hand_landmarks) > 8:
