@@ -50,10 +50,17 @@ def detect_gesture(pose_landmarks, hand_landmarks, face_landmarks=None):
     global current_gesture, last_gesture_time
     
     current_time = time.time()
-    if current_time - last_gesture_time < GESTURE_COOLDOWN:
-        return current_gesture  # Return current gesture if still in cooldown
     
-    # Initialize gesture as None
+    # Check if we're in cooldown for the current gesture
+    if current_gesture and (current_time - last_gesture_time) < GESTURE_COOLDOWN:
+        return None  # Still in cooldown, don't detect new gestures
+    
+    # Reset current_gesture if cooldown has passed
+    if current_gesture and (current_time - last_gesture_time) >= GESTURE_COOLDOWN:
+        with gesture_lock:
+            current_gesture = None
+    
+    # Initialize detected_gesture as None
     detected_gesture = None
     
     try:
@@ -131,7 +138,38 @@ def detect_gesture(pose_landmarks, hand_landmarks, face_landmarks=None):
                 except Exception as e:
                     print(f"Error in cheek detection: {e}")
             
-            # 3. Thumb detection (if no cheek or shoulder touch detected)
+            # 3. Check for lip touch (play/pause)
+            if not detected_gesture and face_landmarks and hand_landmarks and hasattr(hand_landmarks, 'landmark') and len(hand_landmarks.landmark) > 8:
+                try:
+                    # Get index finger tip
+                    index_tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP.value]
+                    
+                    # Get lip landmarks (using MediaPipe Face Mesh indices)
+                    UPPER_LIP = 13
+                    LOWER_LIP = 14
+                    
+                    # Get the actual landmark points
+                    face_landmarks_list = face_landmarks.landmark if hasattr(face_landmarks, 'landmark') else face_landmarks
+                    
+                    if len(face_landmarks_list) > max(UPPER_LIP, LOWER_LIP):
+                        upper_lip = face_landmarks_list[UPPER_LIP]
+                        lower_lip = face_landmarks_list[LOWER_LIP]
+                        
+                        # Calculate distance from finger to lips
+                        dist_to_upper_lip = distance(index_tip, upper_lip)
+                        dist_to_lower_lip = distance(index_tip, lower_lip)
+                        
+                        # Check if finger is close to lips
+                        LIP_THRESHOLD = 0.1  # Adjust this value for sensitivity
+                        
+                        if dist_to_upper_lip < LIP_THRESHOLD or dist_to_lower_lip < LIP_THRESHOLD:
+                            detected_gesture = "TOGGLE_PLAY"
+                            print("Lip touch detected -> Toggle Play/Pause")
+                            
+                except Exception as e:
+                    print(f"Error in lip touch detection: {e}")
+            
+            # 4. Thumb detection (if no other gesture detected)
             if not detected_gesture and len(hand_landmarks) > 8:
                 thumb_tip = hand_landmarks[4]  # Thumb tip
                 index_tip = hand_landmarks[8]   # Index finger tip
@@ -153,8 +191,8 @@ def detect_gesture(pose_landmarks, hand_landmarks, face_landmarks=None):
                         detected_gesture = "VOLUME_DOWN"
                         print("Thumbs down detected")
             
-            # 3. Update gesture state if a new gesture is detected
-            if detected_gesture and detected_gesture != current_gesture:
+            # Update gesture state if a new gesture is detected
+            if detected_gesture:
                 with gesture_lock:
                     current_gesture = detected_gesture
                 last_gesture_time = current_time
@@ -171,6 +209,8 @@ def detect_gesture(pose_landmarks, hand_landmarks, face_landmarks=None):
                     ).start()
                 
                 return detected_gesture
+            
+            return None
             
     except Exception as e:
         print(f"Error in gesture detection: {e}")
