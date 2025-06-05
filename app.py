@@ -31,6 +31,7 @@ GESTURE_COOLDOWN = 2  # seconds
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
 mp_hands = mp.solutions.hands
+mp_face_mesh = mp.solutions.face_mesh
 mp_drawing_styles = mp.solutions.drawing_styles
 
 # Spotify API credentials
@@ -45,7 +46,7 @@ auth_token = None
 refresh_token = None
 
 # Gesture detection function
-def detect_gesture(pose_landmarks, hand_landmarks):
+def detect_gesture(pose_landmarks, hand_landmarks, face_landmarks=None):
     global current_gesture, last_gesture_time
     
     current_time = time.time()
@@ -56,58 +57,104 @@ def detect_gesture(pose_landmarks, hand_landmarks):
     detected_gesture = None
     
     try:
-        if pose_landmarks:
+        if pose_landmarks and hand_landmarks:
             landmarks = pose_landmarks.landmark
             
-            # Calculate distances
+            # Calculate normalized distance between two points
             def distance(a, b):
                 return ((a.x - b.x)**2 + (a.y - b.y)**2)**0.5
             
-            # NEXT: Right hand to right shoulder
-            right_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER]
-            right_hand = landmarks[mp_pose.PoseLandmark.RIGHT_WRIST]
+            # Get required pose landmarks
+            left_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value]
+            right_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
             
-            # PREVIOUS: Left hand to left shoulder
-            left_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER]
-            left_hand = landmarks[mp_pose.PoseLandmark.LEFT_WRIST]
-            
-            # Check for shoulder touches
-            if distance(right_hand, right_shoulder) < 0.1:
-                detected_gesture = "NEXT"
-            elif distance(left_hand, left_shoulder) < 0.1:
-                detected_gesture = "PREVIOUS"
-        
-        # Hand gesture detection
-        if hand_landmarks and not detected_gesture:
             # Get hand landmarks
-            hand = hand_landmarks.landmark
+            hand_landmarks = hand_landmarks.landmark
+            wrist = hand_landmarks[mp_hands.HandLandmark.WRIST.value]
             
-            # Check for thumbs up (Volume Up)
-            thumb_tip = hand[4]  # Thumb tip
-            index_tip = hand[8]  # Index finger tip
+            # 1. Check for hand-to-shoulder gestures (more reliable)
+            SHOULDER_THRESHOLD = 0.15  # Distance threshold for shoulder touch
             
-            # Thumb is above the index finger (y-coordinate is lower in image space)
-            if thumb_tip.y < index_tip.y and thumb_tip.x > hand[0].x:
-                detected_gesture = "VOLUME_UP"
+            # Calculate distances from hand to shoulders
+            left_shoulder_dist = distance(wrist, left_shoulder)
+            right_shoulder_dist = distance(wrist, right_shoulder)
             
-            # Check for thumbs down (Volume Down)
-            elif thumb_tip.y > index_tip.y and thumb_tip.x > hand[0].x:
-                detected_gesture = "VOLUME_DOWN"
+            # Check which shoulder is closer to the hand
+            if left_shoulder_dist < right_shoulder_dist and left_shoulder_dist < SHOULDER_THRESHOLD:
+                detected_gesture = "NEXT_TRACK"
+                print(f"Right shoulder touch detected ({left_shoulder_dist:.3f}) -> Next track")
+            elif right_shoulder_dist < SHOULDER_THRESHOLD:
+                detected_gesture = "PREVIOUS_TRACK"
+                print(f"Left shoulder touch detected ({right_shoulder_dist:.3f}) -> Previous track")
+            
+            # 2. Check for cheek touches (if no shoulder touch detected and face landmarks are available)
+            if not detected_gesture and face_landmarks and hand_landmarks and hasattr(hand_landmarks, 'landmark') and len(hand_landmarks.landmark) > 8:
+                try:
+                    # Get hand wrist position
+                    wrist = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST.value]
+                    
+                    # Get cheek landmarks (indices for left and right cheek points in face mesh)
+                    # Note: These indices might need adjustment based on the exact face mesh model
+                    LEFT_CHEEK_INDEX = 234  # Approximate index for left cheek
+                    RIGHT_CHEEK_INDEX = 454  # Approximate index for right cheek
+                    
+                    # Access face mesh landmarks correctly
+                    if hasattr(face_landmarks, 'landmark'):
+                        left_cheek = face_landmarks.landmark[LEFT_CHEEK_INDEX]
+                        right_cheek = face_landmarks.landmark[RIGHT_CHEEK_INDEX]
+                    else:
+                        # If face_landmarks is already the landmark list
+                        left_cheek = face_landmarks[LEFT_CHEEK_INDEX]
+                        right_cheek = face_landmarks[RIGHT_CHEEK_INDEX]
+                    
+                    # Calculate distances from hand to cheeks
+                    left_cheek_dist = distance(wrist, left_cheek)
+                    right_cheek_dist = distance(wrist, right_cheek)
+                    
+                    # Check for cheek touches
+                    CHEEK_THRESHOLD = 0.1  # Adjust this value for sensitivity
+                    
+                    if left_cheek_dist < CHEEK_THRESHOLD:
+                        detected_gesture = "VOLUME_DOWN"
+                        print(f"Left cheek touch detected ({left_cheek_dist:.3f}) -> Volume Down")
+                    elif right_cheek_dist < CHEEK_THRESHOLD:
+                        detected_gesture = "VOLUME_UP"
+                        print(f"Right cheek touch detected ({right_cheek_dist:.3f}) -> Volume Up")
+                except (IndexError, AttributeError) as e:
+                    # Skip if there's an error accessing landmarks
+                    print(f"Error accessing face landmarks: {e}")
+                    pass
+            
+            # 3. Thumb detection (if no cheek or shoulder touch detected)
+            if not detected_gesture and len(hand_landmarks) > 8:
+                thumb_tip = hand_landmarks[4]  # Thumb tip
+                index_tip = hand_landmarks[8]   # Index finger tip
                 
-            # Check for open palm (Play/Pause)
-            fingers_up = 0
-            for fingertip in [8, 12, 16, 20]:  # Tips of index, middle, ring, pinky
-                if hand[fingertip].y < hand[fingertip-2].y:  # If tip is above joint
-                    fingers_up += 1
+                # Calculate distances for thumb detection
+                thumb_index_dist = distance(thumb_tip, index_tip)
+                thumb_wrist_dist = distance(thumb_tip, wrist)
+                
+                # Thumb up/down detection
+                THUMB_THRESHOLD = 0.08  # Adjust this based on testing
+                
+                # For thumb up/down, we'll check the y-position relative to the wrist
+                if thumb_tip.y < wrist.y - 0.1:  # Thumb is above wrist
+                    if thumb_index_dist < THUMB_THRESHOLD:
+                        detected_gesture = "VOLUME_UP"
+                        print("Thumbs up detected")
+                elif thumb_tip.y > wrist.y + 0.1:  # Thumb is below wrist
+                    if thumb_index_dist < THUMB_THRESHOLD:
+                        detected_gesture = "VOLUME_DOWN"
+                        print("Thumbs down detected")
             
-            if fingers_up >= 3:  # Most fingers extended
-                detected_gesture = "TOGGLE_PLAY"
-        
-        # Update global state if a new gesture is detected
-        if detected_gesture and detected_gesture != current_gesture:
-            with gesture_lock:
-                current_gesture = detected_gesture
+            # 3. Update gesture state if a new gesture is detected
+            if detected_gesture and detected_gesture != current_gesture:
+                with gesture_lock:
+                    current_gesture = detected_gesture
                 last_gesture_time = current_time
+                
+                # Log the detected gesture
+                print(f"Detected gesture: {detected_gesture}")
                 
                 # Control Spotify in a separate thread to avoid blocking
                 if auth_token:
@@ -116,8 +163,8 @@ def detect_gesture(pose_landmarks, hand_landmarks):
                         target=control_spotify,
                         args=(detected_gesture, auth_token)
                     ).start()
-            
-            return detected_gesture
+                
+                return detected_gesture
             
     except Exception as e:
         print(f"Error in gesture detection: {e}")
@@ -153,59 +200,98 @@ def control_spotify(action, token):
     base_url = "https://api.spotify.com/v1/me/player"
     
     try:
-        # Handle volume controls first as they require additional API calls
+        # First, check if there's an active device
+        try:
+            devices_response = requests.get(
+                "https://api.spotify.com/v1/me/player/devices",
+                headers=headers,
+                timeout=3
+            )
+            
+            if devices_response.status_code != 200:
+                print(f"Failed to get devices: {devices_response.status_code}")
+                if devices_response.status_code == 403:
+                    print("Error: Insufficient permissions. Make sure your app has the required scopes.")
+                # Continue with basic controls even if device detection fails
+                
+            devices = devices_response.json().get('devices', [])
+            active_devices = [d for d in devices if d.get('is_active', False)]
+            
+            if not active_devices:
+                print("No active Spotify device found. Please make sure Spotify is playing on one of your devices.")
+                # Continue with basic controls even if no active device is found
+                
+        except requests.exceptions.RequestException as e:
+            print(f"Device check error: {e}")
+            # Continue with basic controls even if device check fails
+            
+        # Handle volume controls with Spotify Web API
         if action in ["VOLUME_UP", "VOLUME_DOWN"]:
             try:
-                # Get current volume
-                vol_response = requests.get(f"{base_url}/volume", headers=headers, timeout=5)
-                if vol_response.status_code != 200:
-                    print(f"Failed to get current volume: {vol_response.status_code}")
-                    return False
-                    
-                current_vol = vol_response.json().get('volume_percent', 50)
+                # Get current playback state
+                response = requests.get(
+                    f"{base_url}",
+                    headers=headers,
+                    timeout=2
+                )
                 
-                # Calculate new volume
+                if response.status_code != 200:
+                    print(f"Failed to get playback state: {response.status_code}")
+                    return True
+                
+                data = response.json()
+                
+                # Check if device supports volume control
+                if not data.get('device', {}).get('supports_volume', True):
+                    print("Device doesn't support volume control")
+                    return True
+                
+                # Get current volume or default to 25
+                current_volume = data.get('device', {}).get('volume_percent', 25)
+                step = 25  # Volume step size
+                
+                # Calculate new volume (0-100 range)
                 if action == "VOLUME_UP":
-                    new_vol = min(100, int(current_vol) + 10)
+                    new_volume = min(100, current_volume + step)
                 else:  # VOLUME_DOWN
-                    new_vol = max(0, int(current_vol) - 10)
+                    new_volume = max(0, current_volume - step)
+                
+                print(f"Volume: {current_volume}% -> {new_volume}% ({action})")
                 
                 # Set new volume
                 response = requests.put(
                     f"{base_url}/volume",
-                    params={"volume_percent": new_vol},
+                    params={"volume_percent": new_volume},
                     headers=headers,
-                    timeout=5
+                    timeout=2
                 )
-            except requests.exceptions.RequestException as e:
-                print(f"Volume control error: {e}")
-                return False
+                
+                if response.status_code not in (200, 202, 204):
+                    print(f"Volume control failed: {response.status_code} - {response.text}")
+                
+                return True
+                
+            except Exception as e:
+                print(f"Volume control error: {str(e)}")
+                return True
                 
         # Handle other actions
         else:
-            endpoints = {
-                "NEXT": ("POST", f"{base_url}/next"),
-                "PREVIOUS": ("POST", f"{base_url}/previous"),
-                "PLAY": ("PUT", f"{base_url}/play"),
-                "PAUSE": ("PUT", f"{base_url}/pause"),
-                "TOGGLE_PLAY": ("PUT", f"{base_url}/play")  # Toggle play/pause
-            }
-            
-            if action not in endpoints:
-                print(f"Unknown action: {action}")
-                return False
-                
-            method, url = endpoints[action]
-            
             try:
-                if method == "POST":
-                    response = requests.post(url, headers=headers, timeout=5)
-                else:  # PUT
-                    response = requests.put(url, headers=headers, timeout=5)
-                    
-                # For toggle play, if play fails, try pause
-                if action == "TOGGLE_PLAY" and response.status_code != 204:
-                    response = requests.put(f"{base_url}/pause", headers=headers, timeout=5)
+                if action in ["NEXT_TRACK", "NEXT"]:
+                    response = requests.post(f"{base_url}/next", headers=headers, timeout=5)
+                elif action in ["PREVIOUS_TRACK", "PREVIOUS"]:
+                    response = requests.post(f"{base_url}/previous", headers=headers, timeout=5)
+                elif action in ["PLAY", "PAUSE"]:
+                    response = requests.put(f"{base_url}/{action.lower()}", headers=headers, timeout=5)
+                elif action == "TOGGLE_PLAY":
+                    # First try to play, if that fails, try to pause
+                    response = requests.put(f"{base_url}/play", headers=headers, timeout=5)
+                    if response.status_code != 204:
+                        response = requests.put(f"{base_url}/pause", headers=headers, timeout=5)
+                else:
+                    print(f"Unknown action: {action}")
+                    return False
                     
             except requests.exceptions.RequestException as e:
                 print(f"Request failed for {action}: {e}")
@@ -241,14 +327,28 @@ def control_spotify(action, token):
         return False
 
 def generate_frames():
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("Error: Could not open video device")
+    # Suppress OpenCV warnings
+    import os
+    os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'  # Suppress OpenCV warnings
+    
+    # Try to initialize the camera with retries
+    max_retries = 3
+    cap = None
+    for attempt in range(max_retries):
+        cap = cv2.VideoCapture(0)
+        if cap.isOpened():
+            break
+        print(f"Camera initialization attempt {attempt + 1} failed")
+        time.sleep(1)
+    
+    if not cap or not cap.isOpened():
+        print("Error: Could not open video device after multiple attempts")
         return
     
-    # Set a lower resolution for better performance
+    # Set camera properties
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_FPS, 30)
     
     # Initialize MediaPipe components with optimized settings
     with mp_pose.Pose(
@@ -258,62 +358,111 @@ def generate_frames():
         mp_hands.Hands(
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
-            max_num_hands=2) as hands:
+            max_num_hands=2) as hands, \
+        mp_face_mesh.FaceMesh(
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5) as face_mesh:
         
         frame_count = 0
         process_every_n_frame = 2  # Process every 2nd frame for better performance
         
+        consecutive_errors = 0
+        max_consecutive_errors = 10
+        
         while cap.isOpened():
-            success, frame = cap.read()
-            if not success:
-                print("Ignoring empty camera frame.")
+            success = False
+            frame = None
+            
+            # Try reading frame with error handling
+            try:
+                success, frame = cap.read()
+            except Exception as e:
+                print(f"Error reading frame: {e}")
+                consecutive_errors += 1
+                if consecutive_errors > max_consecutive_errors:
+                    print("Too many consecutive errors. Exiting video capture.")
+                    break
+                time.sleep(0.1)
                 continue
+                
+            if not success or frame is None:
+                consecutive_errors += 1
+                if consecutive_errors > max_consecutive_errors:
+                    print("Too many consecutive empty frames. Exiting video capture.")
+                    break
+                time.sleep(0.1)
+                continue
+                
+            consecutive_errors = 0  # Reset error counter on successful frame read
                 
             frame_count += 1
             process_gesture = (frame_count % process_every_n_frame) == 0
             
-            # Convert the BGR image to RGB
-            image = cv2.cvtColor(cv2.flip(frame, 1), cv2.COLOR_BGR2RGB)
-            image.flags.writeable = False
+            # Mirror the frame for more intuitive control
+            frame = cv2.flip(frame, 1)
             
-            # Only process pose and hands if we're processing this frame for gestures
-            if process_gesture:
-                # Process the image and detect pose and hands
-                pose_results = pose.process(image)
-                hand_results = hands.process(image)
-                
-                # Update gesture detection in a non-blocking way
-                if pose_results.pose_landmarks:
-                    hand_landmarks = hand_results.multi_hand_landmarks[0] if hand_results.multi_hand_landmarks else None
-                    # Start a new thread for gesture detection to avoid blocking
-                    import threading
-                    threading.Thread(
-                        target=detect_gesture,
-                        args=(pose_results.pose_landmarks, hand_landmarks)
-                    ).start()
+            # Process frame with MediaPipe
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_rgb.flags.writeable = False
             
-            # Prepare image for display (always do this for smooth video)
-            image.flags.writeable = True
-            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            # Process pose, hand, and face landmarks
+            pose_results = pose.process(frame_rgb)
+            hand_results = hands.process(frame_rgb)
+            face_results = face_mesh.process(frame_rgb)
             
+            frame_rgb.flags.writeable = True
+            
+            # Store face landmarks in results for gesture detection
+            results = type('', (), {})()
+            results.face_landmarks = face_results.multi_face_landmarks[0] if face_results.multi_face_landmarks else None
+            
+            # Update gesture detection in a non-blocking way
+            if pose_results.pose_landmarks:
+                hand_landmarks = hand_results.multi_hand_landmarks[0] if hand_results.multi_hand_landmarks else None
+                # Start a new thread for gesture detection to avoid blocking
+                import threading
+                threading.Thread(
+                    target=detect_gesture,
+                    args=(pose_results.pose_landmarks, hand_landmarks, results.face_landmarks)
+                ).start()
+            
+            # Prepare image for display
+            frame_rgb.flags.writeable = True
+            image = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+            
+            # Draw landmarks on every frame for smooth visualization
             # Draw pose landmarks if detected
-            if process_gesture and hasattr(pose_results, 'pose_landmarks') and pose_results.pose_landmarks:
+            if hasattr(pose_results, 'pose_landmarks') and pose_results.pose_landmarks:
                 mp_drawing.draw_landmarks(
-                    image,
-                    pose_results.pose_landmarks,
+                    image, 
+                    pose_results.pose_landmarks, 
                     mp_pose.POSE_CONNECTIONS,
-                    landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style()
+                    mp_drawing.DrawingSpec(color=(245,117,66), thickness=2, circle_radius=2),
+                    mp_drawing.DrawingSpec(color=(245,66,230), thickness=2, circle_radius=2)
                 )
             
             # Draw hand landmarks if detected
-            if process_gesture and hasattr(hand_results, 'multi_hand_landmarks') and hand_results.multi_hand_landmarks:
+            if hand_results.multi_hand_landmarks:
                 for hand_landmarks in hand_results.multi_hand_landmarks:
                     mp_drawing.draw_landmarks(
-                        image,
-                        hand_landmarks,
+                        image, 
+                        hand_landmarks, 
                         mp_hands.HAND_CONNECTIONS,
-                        mp_drawing_styles.get_default_hand_landmarks_style(),
-                        mp_drawing_styles.get_default_hand_connections_style()
+                        mp_drawing.DrawingSpec(color=(121,22,76), thickness=2, circle_radius=2),
+                        mp_drawing.DrawingSpec(color=(121,44,250), thickness=2, circle_radius=2)
+                    )
+            
+            # Draw face mesh if detected (use a subtle color)
+            if face_results.multi_face_landmarks:
+                for face_landmarks in face_results.multi_face_landmarks:
+                    mp_drawing.draw_landmarks(
+                        image=image,
+                        landmark_list=face_landmarks,
+                        connections=mp_face_mesh.FACEMESH_TESSELATION,
+                        landmark_drawing_spec=None,
+                        connection_drawing_spec=mp_drawing.DrawingSpec(color=(0, 200, 0), thickness=1, circle_radius=1)
                     )
             
             # Draw current gesture status
