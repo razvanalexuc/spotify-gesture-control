@@ -26,6 +26,8 @@ gesture_lock = Lock()
 current_gesture = None
 last_gesture_time = 0
 GESTURE_COOLDOWN = 2  # seconds
+last_detected_gesture = None  # Prevents repeated TOGGLE_PLAY triggers
+back_of_hand_active = False  # Tracks back of hand state for edge detection
 
 # Initialize MediaPipe
 mp_drawing = mp.solutions.drawing_utils
@@ -47,7 +49,7 @@ refresh_token = None
 
 # Gesture detection function
 def detect_gesture(pose_landmarks, hand_landmarks, face_landmarks=None):
-    global current_gesture, last_gesture_time
+    global current_gesture, last_gesture_time, last_detected_gesture, back_of_hand_active
     
     current_time = time.time()
     
@@ -169,10 +171,13 @@ def detect_gesture(pose_landmarks, hand_landmarks, face_landmarks=None):
                 except Exception as e:
                     print(f"Error in lip touch detection: {e}")
             
-            # 4. Thumb detection (if no other gesture detected)
+            # 4. Thumb detection and back-of-hand detection (if no other gesture detected)
             if not detected_gesture and len(hand_landmarks) > 8:
                 thumb_tip = hand_landmarks[4]  # Thumb tip
                 index_tip = hand_landmarks[8]   # Index finger tip
+                middle_tip = hand_landmarks[12]  # Middle finger tip
+                ring_tip = hand_landmarks[16]    # Ring finger tip
+                pinky_tip = hand_landmarks[20]   # Pinky tip
                 
                 # Calculate distances for thumb detection
                 thumb_index_dist = distance(thumb_tip, index_tip)
@@ -182,21 +187,49 @@ def detect_gesture(pose_landmarks, hand_landmarks, face_landmarks=None):
                 THUMB_THRESHOLD = 0.08  # Adjust this based on testing
                 
                 # For thumb up/down, we'll check the y-position relative to the wrist
+                thumb_gesture_detected = False
                 if thumb_tip.y < wrist.y - 0.1:  # Thumb is above wrist
                     if thumb_index_dist < THUMB_THRESHOLD:
                         detected_gesture = "VOLUME_UP"
+                        thumb_gesture_detected = True
                         print("Thumbs up detected")
                 elif thumb_tip.y > wrist.y + 0.1:  # Thumb is below wrist
                     if thumb_index_dist < THUMB_THRESHOLD:
                         detected_gesture = "VOLUME_DOWN"
+                        thumb_gesture_detected = True
                         print("Thumbs down detected")
+                
+                # Only check for back-of-hand if no thumb gesture was detected
+                if not thumb_gesture_detected:
+                    # Back of hand detection for play/pause
+                    # Check if all fingertips are above the wrist (back of hand is facing the camera)
+                    if (wrist.y > thumb_tip.y and 
+                        wrist.y > index_tip.y and 
+                        wrist.y > middle_tip.y and 
+                        wrist.y > ring_tip.y and 
+                        wrist.y > pinky_tip.y):
+                        # Check if fingers are roughly at the same height (hand is flat)
+                        y_positions = [thumb_tip.y, index_tip.y, middle_tip.y, ring_tip.y, pinky_tip.y]
+                        max_y_diff = max(y_positions) - min(y_positions)
+                        if max_y_diff < 0.15:  # Threshold for flat hand
+                            # Edge detection: trigger TOGGLE_PLAY only on transition from not detected to detected
+                            if not back_of_hand_active:
+                                detected_gesture = "TOGGLE_PLAY"
+                                print("Back of hand detected -> Toggle Play/Pause")
+                                back_of_hand_active = True
+                        else:
+                            back_of_hand_active = False
+                    else:
+                        back_of_hand_active = False
+                else:
+                    back_of_hand_active = False
             
             # Update gesture state if a new gesture is detected
             if detected_gesture:
                 with gesture_lock:
                     current_gesture = detected_gesture
                 last_gesture_time = current_time
-                
+                last_detected_gesture = detected_gesture  # Update last_detected_gesture
                 # Log the detected gesture
                 print(f"Detected gesture: {detected_gesture}")
                 
@@ -209,6 +242,8 @@ def detect_gesture(pose_landmarks, hand_landmarks, face_landmarks=None):
                     ).start()
                 
                 return detected_gesture
+            else:
+                last_detected_gesture = None  # Reset if no gesture detected
             
             return None
             
